@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { GET, POST, PUT, DEL } from './api';
 import { FlowEditor } from './FlowEditor';
+import { useAuth } from './auth-context';
 import { DocSection } from './Documents';
 import type { Doc } from './Documents';
 import type { Line, Station, Control, Ctq, Matrix } from './api';
@@ -14,6 +15,7 @@ type Tab = 'flow' | 'pl' | 'matrix';
 type View = { page: 'home' } | { page: 'line'; id: number; tab: Tab } | { page: 'ctqs' };
 
 export function App() {
+  const { user, logout } = useAuth();
   const [view, setView] = useState<View>({ page: 'home' });
   const [err, setErr] = useState('');
   return (
@@ -26,6 +28,9 @@ export function App() {
         <nav className="ml-auto flex gap-4 text-sm">
           <button className="hover:underline" onClick={() => setView({ page: 'home' })}>Lignes</button>
           <button className="hover:underline" onClick={() => setView({ page: 'ctqs' })}>CTQ</button>
+          <span className="text-slate-400" aria-hidden="true">|</span>
+          <span className="text-slate-300">{user?.email}</span>
+          <button className="hover:underline" onClick={() => void logout()}>Déconnexion</button>
         </nav>
       </header>
       {err && (

@@ -89,6 +89,32 @@ CREATE TABLE IF NOT EXISTS controls_ctqs (
 CREATE INDEX IF NOT EXISTS idx_stations_line ON stations(line_id, ordre);
 CREATE INDEX IF NOT EXISTS idx_controls_station ON controls(station_id);
 CREATE INDEX IF NOT EXISTS idx_controls_ctqs_ctq ON controls_ctqs(ctq_id);
+
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL DEFAULT '',
+  first_name TEXT DEFAULT '',
+  last_name TEXT DEFAULT '',
+  role TEXT NOT NULL DEFAULT 'reader' CHECK (role IN ('reader','author','admin')),
+  active INTEGER NOT NULL DEFAULT 1,
+  auth_provider TEXT NOT NULL DEFAULT 'local',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS sessions (
+  token TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT NOT NULL DEFAULT (datetime('now', '+24 hours'))
+);
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  actor_email TEXT NOT NULL,
+  action TEXT NOT NULL,
+  target TEXT DEFAULT '',
+  detail TEXT DEFAULT '',
+  at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 CREATE INDEX IF NOT EXISTS idx_flow_edges_line ON flow_edges(line_id);
 `;
 
@@ -123,7 +149,7 @@ function migrate(db: Db): void {
   db.exec('CREATE TABLE IF NOT EXISTS flow_edges (id INTEGER PRIMARY KEY AUTOINCREMENT, line_id INTEGER NOT NULL REFERENCES lines(id) ON DELETE CASCADE, from_station INTEGER NOT NULL REFERENCES stations(id) ON DELETE CASCADE, to_station INTEGER NOT NULL REFERENCES stations(id) ON DELETE CASCADE)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_flow_edges_line ON flow_edges(line_id)');
   const ver = db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string } | undefined;
-  if (!ver || ver.value < '3') db.prepare("UPDATE meta SET value='3' WHERE key='schema_version'").run();
+  if (!ver || ver.value < '4') db.prepare("UPDATE meta SET value='4' WHERE key='schema_version'").run();
 }
 
 export function openDb(file: string): Db {

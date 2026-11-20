@@ -7,6 +7,7 @@ import type { Server } from 'node:http';
 import type { Express } from 'express';
 import { openDb } from '../src/db.js';
 import { buildApp } from '../src/app.js';
+import bcrypt from 'bcryptjs';
 
 let server: Server;
 let base: string;
@@ -18,6 +19,13 @@ async function start(): Promise<void> {
   const ins = db.prepare('INSERT INTO ctqs(code, label, family, regime) VALUES (?, ?, ?, ?)');
   ins.run('CTQ-A', 'CTQ alpha', 'famille1', 'R1');
   ins.run('CTQ-B', 'CTQ bêta', 'famille1', 'R2');
+  // seed auth : 3 comptes + sessions a token fixe (le guard central exige une session)
+  const mkUser = db.prepare('INSERT INTO users (email, password_hash, role) VALUES (?, ?, ?)');
+  const mkSession = db.prepare('INSERT INTO sessions (token, user_id) VALUES (?, ?)');
+  for (const [tok, role] of [['tok-admin', 'admin'], ['tok-author', 'author'], ['tok-reader', 'reader']] as const) {
+    const info = mkUser.run(tok.replace('tok-', '') + '@test.local', bcrypt.hashSync('Test1234!', bcrypt.genSaltSync(10)), role);
+    mkSession.run(tok, Number(info.lastInsertRowid));
+  }
   const app: Express = buildApp(db);
   await new Promise<void>((resolve) => {
     server = app.listen(0, '127.0.0.1', () => resolve());
@@ -30,10 +38,13 @@ async function stop(): Promise<void> {
 }
 
 let seq = 0;
-async function j(method: string, url: string, body?: unknown): Promise<Response> {
+async function j(method: string, url: string, body?: unknown, token: string | null = 'tok-admin'): Promise<Response> {
+  const headers: Record<string, string> = {};
+  if (token) headers.cookie = 'qp_session=' + token;
+  if (body !== undefined) headers['content-type'] = 'application/json';
   return fetch(base + url, {
     method,
-    headers: body !== undefined ? { 'content-type': 'application/json' } : {},
+    headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
 }

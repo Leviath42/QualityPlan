@@ -5,6 +5,11 @@ export async function api<T>(method: string, url: string, body?: unknown): Promi
     headers: body !== undefined ? { 'content-type': 'application/json' } : {},
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+  if (r.status === 401 && !url.startsWith('/api/auth/')) {
+    // Session absente/expirée sur une route métier : retour à l'écran de login.
+    window.location.reload();
+    throw new Error('Session expirée');
+  }
   if (r.status === 204) return undefined as T;
   const ct = r.headers.get('content-type') || '';
   const data = ct.includes('json') ? await r.json() : await r.text();
@@ -21,6 +26,24 @@ export const GET = <T>(u: string) => api<T>('GET', u);
 export const POST = <T>(u: string, b?: unknown) => api<T>('POST', u, b);
 export const PUT = <T>(u: string, b?: unknown) => api<T>('PUT', u, b);
 export const DEL = <T>(u: string) => api<T>('DELETE', u);
+
+export interface AuthUser {
+  id: number;
+  email: string;
+  role: 'reader' | 'author' | 'admin';
+  first_name?: string;
+  last_name?: string;
+}
+
+export async function apiLogin(email: string, password: string, totpCode?: string): Promise<AuthUser> {
+  return api<AuthUser>('POST', '/api/auth/login', { email, password, ...(totpCode ? { totpCode } : {}) });
+}
+export async function apiLogout(): Promise<void> {
+  await api('POST', '/api/auth/logout', {});
+}
+export async function apiMe(): Promise<AuthUser> {
+  return api<AuthUser>('GET', '/api/auth/me');
+}
 
 // ---- Types -----------------------------------------------------------------
 

@@ -1,5 +1,12 @@
 import express, { type Express, type Request, type Response, type NextFunction } from 'express';
 import { z, ZodError } from 'zod';
+import cookieParser from 'cookie-parser';
+import { authRouter } from './routes/auth.js';
+import { attachAuth } from './auth/middleware.js';
+import { requireRole, purgeExpiredSessions, type SessionUser } from './auth/sessions.js';
+import { purgeAudit } from './auth/audit.js';
+import { securityHeaders, loginRateLimiter } from './auth/security.js';
+import { assertSameOrigin } from './auth/origin.js';
 import type { Db } from './db.js';
 
 // ---------------------------------------------------------------------------
@@ -155,6 +162,31 @@ export function buildApp(db: Db): Express {
   const app = express();
   app.locals.db = db;
   app.use(express.json({ limit: '2mb' }));
+  // ---- Sécurité & auth (reprise du socle modop, adapté QP) -----------------
+  purgeExpiredSessions(db);
+  purgeAudit(db);
+  app.use(securityHeaders());
+  app.use(cookieParser());
+  app.use(attachAuth(db));
+  app.use(assertSameOrigin());
+  app.use('/api/auth/login', loginRateLimiter());
+  app.use('/api/auth', authRouter(db));
+
+  // Guard central : toute l'API exige une session, sauf /health et /public.
+  const apiGuard = (req: Request, res: Response, next: NextFunction): void => {
+    if (req.path === '/health' || req.path === '/public' || req.path.startsWith('/public/')) { next(); return; }
+    const user = (req as Request & { user?: SessionUser | null }).user ?? null;
+    if (!requireRole(user, 'reader')) {
+      res.status(401).json({ error: 'unauthorized', message: 'Connexion requise' });
+      return;
+    }
+    if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(req.method) && !requireRole(user, 'author')) {
+      res.status(403).json({ error: 'forbidden', message: 'Rôle insuffisant (author requis)' });
+      return;
+    }
+    next();
+  };
+  app.use('/api', apiGuard);
 
   const wrap = (fn: (req: Request, res: Response) => unknown) =>
     (req: Request, res: Response, next: NextFunction) => {
