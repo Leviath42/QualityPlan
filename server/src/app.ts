@@ -43,6 +43,53 @@ function controlsOfLine(db: Db, lineId: number): Array<ControlRow & { ctq_ids: n
     }));
 }
 
+// Docs d'une cible (ligne / step / contrôle).
+function docsOf(db: Db, scopeType: string, scopeId: number) {
+  return db
+    .prepare('SELECT id, source, modop_ref, title, url FROM documents WHERE scope_type = ? AND scope_id = ? ORDER BY id')
+    .all(scopeType, scopeId);
+}
+
+function lineOfScoped(db: Db, scopeType: string, scopeId: number): number | null {
+  if (scopeType === 'station') {
+    const r = db.prepare('SELECT line_id FROM stations WHERE id = ?').get(scopeId) as { line_id: number } | undefined;
+    return r?.line_id ?? null;
+  }
+  if (scopeType === 'control') {
+    const r = db.prepare('SELECT s.line_id AS lid FROM controls c JOIN stations s ON s.id = c.station_id WHERE c.id = ?').get(scopeId) as { lid: number } | undefined;
+    return r?.lid ?? null;
+  }
+  return scopeId;
+}
+
+// Recherche de MO modop via son MCP natif (stateless, Bearer).
+async function modopWorkflows(search: string): Promise<Array<Record<string, unknown>>> {
+  const base = (process.env.MODOP_MCP_URL ?? '').replace(/\/$/, '');
+  const token = process.env.MODOP_MCP_TOKEN ?? '';
+  if (!base || !token) return [];
+  const body = {
+    jsonrpc: '2.0', id: 1, method: 'tools/call',
+    params: { name: 'list_workflows', arguments: { state: 'published', ...(search ? { search } : {}) } },
+  };
+  const r = await fetch(base, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token, 'user-agent': 'qualityplan/0.3' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const j = (await r.json()) as { result?: { content?: Array<{ text?: string }> } };
+  const text = j.result?.content?.[0]?.text ?? '[]';
+  const parsed = JSON.parse(text) as unknown;
+  const rows: Array<Record<string, unknown>> = Array.isArray(parsed) ? (parsed as Array<Record<string, unknown>>) : [];
+  const baseUrl = (process.env.MODOP_BASE_URL ?? '').replace(/\/$/, '');
+  if (baseUrl) {
+    for (const r of rows) {
+      if (!r.url && (r.reference || r.id)) r.url = baseUrl + '/' + String(r.slug ?? r.reference ?? r.id);
+    }
+  }
+  return rows;
+}
+
 // ---------------------------------------------------------------------------
 // Schémas zod
 // ---------------------------------------------------------------------------
@@ -106,6 +153,7 @@ export type CtqRow = { id: number; code: string; label: string; family: string; 
 
 export function buildApp(db: Db): Express {
   const app = express();
+  app.locals.db = db;
   app.use(express.json({ limit: '2mb' }));
 
   const wrap = (fn: (req: Request, res: Response) => unknown) =>
@@ -407,6 +455,116 @@ export function buildApp(db: Db): Express {
     });
   }));
 
+  // ---- Documents (3 niveaux : ligne / step / contrôle, refs modop) -------
+  const docSchema = z.object({
+    title: z.string().trim().min(1).max(300),
+    modop_ref: z.string().trim().max(120).optional().default(''),
+    url: z.string().trim().max(500).optional().default(''),
+    source: z.string().trim().max(60).optional().default('modop'),
+  });
+  const SCOPES: Record<string, string> = { lines: 'line', stations: 'station', controls: 'control' };
+
+  // vue agrégée par ligne : docs génériques + par step + par contrôle
+  app.get('/api/lines/:id/documents', wrap((req, res) => {
+    const line = db.prepare(`SELECT id FROM lines WHERE id = ?`).get(Number(req.params.id));
+    if (!line) { res.status(404).json({ error: 'ligne introuvable' }); return; }
+    const generic = docsOf(db, 'line', Number(req.params.id));
+    const stations: Record<number, unknown[]> = {};
+    for (const st of db.prepare(`SELECT id FROM stations WHERE line_id = ?`).all(Number(req.params.id)) as Array<{ id: number }>) {
+      stations[st.id] = docsOf(db, 'station', st.id);
+    }
+    const controls: Record<number, unknown[]> = {};
+    for (const ct of controlsOfLine(db, Number(req.params.id))) {
+      controls[ct.id] = docsOf(db, 'control', ct.id);
+    }
+    res.json({ generic, stations, controls });
+  }));
+
+  app.get('/api/:scope(lines|stations|controls)/:id/documents', wrap((req, res) => {
+    const t = SCOPES[(req.params as { scope: string }).scope];
+    const rows = db
+      .prepare(`SELECT * FROM documents WHERE scope_type = ? AND scope_id = ? ORDER BY id`)
+      .all(t, Number(req.params.id));
+    res.json(docsOf(db, t, Number(req.params.id)));
+  }));
+
+  app.post('/api/:scope(lines|stations|controls)/:id/documents', wrap((req, res) => {
+    const t = SCOPES[(req.params as { scope: string }).scope];
+    const id = Number(req.params.id);
+    const owner = db.prepare(`SELECT id FROM ${t === 'line' ? 'lines' : t === 'station' ? 'stations' : 'controls'} WHERE id = ?`).get(id);
+    if (!owner) { res.status(404).json({ error: 'cible introuvable' }); return; }
+    const data = docSchema.parse(req.body);
+    try {
+      const info = db
+        .prepare(`INSERT INTO documents(scope_type, scope_id, source, modop_ref, title, url) VALUES (?,?,?,?,?,?)`)
+        .run(t, id, data.source, data.modop_ref, data.title, data.url);
+      if (t !== 'line') {
+        const lid = lineOfScoped(db, t, id);
+        if (lid) touchLine(db, lid);
+      } else { touchLine(db, id); }
+      res.status(201).json(db.prepare(`SELECT * FROM documents WHERE id = ?`).get(Number(info.lastInsertRowid)));
+    } catch (e: unknown) {
+      if ((e as { code?: string }).code === 'SQLITE_CONSTRAINT_UNIQUE') {
+        res.status(409).json({ error: 'document déjà lié à cette cible' }); return;
+      }
+      throw e;
+    }
+  }));
+
+  app.delete('/api/documents/:id', wrap((req, res) => {
+    const row = db.prepare(`SELECT * FROM documents WHERE id = ?`).get(Number(req.params.id)) as { scope_type: string; scope_id: number } | undefined;
+    if (!row) { res.status(404).json({ error: 'document introuvable' }); return; }
+    db.prepare(`DELETE FROM documents WHERE id = ?`).run(Number(req.params.id));
+    if (row.scope_type === 'line') touchLine(db, row.scope_id);
+    else { const lid = lineOfScoped(db, row.scope_type, row.scope_id); if (lid) touchLine(db, lid); }
+    res.status(204).end();
+  }));
+
+
+  // Proxy recherche modop (via son MCP natif, outil list_workflows) — jamais de
+  // secret en dur : env MODOP_MCP_URL / MODOP_MCP_TOKEN.
+  app.get('/api/modop/search', wrap(async (req, res) => {
+    try {
+      const q = String(req.query.q ?? '').slice(0, 100);
+      const rows = await modopWorkflows(q);
+      res.json(rows);
+    } catch (e) { res.status(502).json({ error: 'modop injoignable', detail: String(e).slice(0, 200) }); }
+  }));
+
+  // ---- API publique (token X-API-Token) — consommée par modop & co --------
+  const publicApi = () => Boolean(process.env.QP_PUBLIC_TOKEN);
+  const publicGuard = wrap((req: import('express').Request, res: import('express').Response, next?: import('express').NextFunction) => {
+    res.status(501).json({ error: 'disabled' });
+  });
+  app.use('/api/public', (req, res, next) => {
+    if (!publicApi()) { res.status(501).json({ error: 'api publique désactivée (QP_PUBLIC_TOKEN absent)' }); return; }
+    const presented = (req.headers['x-api-token'] ?? '') as string;
+    const expected = process.env.QP_PUBLIC_TOKEN ?? '';
+    const ok = presented.length === expected.length && Buffer.compare(Buffer.from(presented), Buffer.from(expected)) === 0;
+    if (!ok) { res.status(401).json({ error: 'token invalide ou absent' }); return; }
+    next();
+  });
+  app.get('/api/public/lines', (_req, res) => {
+    res.json(db.prepare(`SELECT id, code, name, product_line, client, updated_at FROM lines ORDER BY code`).all());
+  });
+  app.get('/api/public/lines/:id/flow', wrap((req, res) => {
+    const line = db.prepare(`SELECT * FROM lines WHERE id = ?`).get(Number(req.params.id)) as LineRow | undefined;
+    if (!line) { res.status(404).json({ error: 'ligne introuvable' }); return; }
+    const steps = db.prepare(`SELECT * FROM stations WHERE line_id = ? ORDER BY ordre, id`).all(line.id);
+    const edges = (db.prepare(`SELECT from_station, to_station FROM flow_edges WHERE line_id = ? ORDER BY id`).all(line.id) as Array<{ from_station: number; to_station: number }>).map((e) => ({ from: e.from_station, to: e.to_station }));
+    res.json({ line: { id: line.id, code: line.code, name: line.name }, steps, edges });
+  }));
+  app.get('/api/public/lines/:id/pl', wrap((req, res) => {
+    const full = getLine(db, Number(req.params.id));
+    if (!full) { res.status(404).json({ error: 'ligne introuvable' }); return; }
+    const docs = {
+      generic: docsOf(db, 'line', full.id),
+      stations: Object.fromEntries((full.stations ?? []).map((s) => [s.id, docsOf(db, 'station', s.id)])),
+      controls: Object.fromEntries((full.stations ?? []).flatMap((s) => s.controls ?? []).map((c) => [c.id, docsOf(db, 'control', c.id)])),
+    };
+    res.json({ ...full, documents: docs });
+  }));
+
   // ---- Export markdown --------------------------------------------------------
   app.get('/api/lines/:id/export', wrap((req, res) => {
     const line = getLine(db, Number(req.params.id));
@@ -420,10 +578,21 @@ export function buildApp(db: Db): Express {
     out.push('**Référence** : ' + (line.ref || 'PL ' + line.code) + ' — ligne ' + line.name);
     out.push('**Ligne produit** : ' + (line.product_line || '-') + ' — **Client** : ' + (line.client || '-'));
     out.push('**Rédacteur** : ' + (line.redacteur || '-') + ' — **Vérificateur** : ' + (line.verificateur || '-') + ' — **Approbateur** : ' + (line.approbateur || '-'));
+    const generic = docsOf(db, 'line', Number(line.id)) as Array<{ title: string; modop_ref: string; url: string }>;
+    if (generic.length > 0) {
+      out.push('### Documents génériques (ligne)');
+      for (const g of generic) {
+        out.push('- [' + g.title + '](' + (g.url || '#') + ')' + (g.modop_ref ? ' — ref ' + g.modop_ref : ''));
+      }
+      out.push('');
+    }
     out.push('');
     for (const st of line.stations) {
       out.push('## Poste ' + (st.ordre + 1) + ' — ' + st.name);
       out.push('');
+      for (const d of docsOf(db, 'station', Number(st.id)) as Array<{ title: string; modop_ref: string; url: string }>) {
+        out.push('- Document : [' + d.title + '](' + (d.url || '#') + ')' + (d.modop_ref ? ' — ref ' + d.modop_ref : ''));
+      }
       if (st.controls.length === 0) { out.push('_Aucun contrôle défini._'); out.push(''); continue; }
       out.push('| Caractéristique | Doc réf | Moyen | Support | Fréquence | Responsable | Réaction NC | CTQ |');
       out.push('|---|---|---|---|---|---|---|---|');

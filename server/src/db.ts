@@ -67,6 +67,19 @@ CREATE TABLE IF NOT EXISTS ctqs (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS documents (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scope_type TEXT NOT NULL CHECK(scope_type IN ('line','station','control')),
+  scope_id INTEGER NOT NULL,
+  source TEXT NOT NULL DEFAULT 'modop',
+  modop_ref TEXT NOT NULL DEFAULT '',
+  title TEXT NOT NULL,
+  url TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(scope_type, scope_id, source, modop_ref, title)
+);
+CREATE INDEX IF NOT EXISTS idx_documents_scope ON documents(scope_type, scope_id);
+
 CREATE TABLE IF NOT EXISTS controls_ctqs (
   control_id INTEGER NOT NULL REFERENCES controls(id) ON DELETE CASCADE,
   ctq_id INTEGER NOT NULL REFERENCES ctqs(id) ON DELETE CASCADE,
@@ -109,6 +122,8 @@ function migrate(db: Db): void {
   }
   db.exec('CREATE TABLE IF NOT EXISTS flow_edges (id INTEGER PRIMARY KEY AUTOINCREMENT, line_id INTEGER NOT NULL REFERENCES lines(id) ON DELETE CASCADE, from_station INTEGER NOT NULL REFERENCES stations(id) ON DELETE CASCADE, to_station INTEGER NOT NULL REFERENCES stations(id) ON DELETE CASCADE)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_flow_edges_line ON flow_edges(line_id)');
+  const ver = db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value: string } | undefined;
+  if (!ver || ver.value < '3') db.prepare("UPDATE meta SET value='3' WHERE key='schema_version'").run();
 }
 
 export function openDb(file: string): Db {

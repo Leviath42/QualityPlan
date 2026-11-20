@@ -237,3 +237,72 @@ test('flow : sauvegarde steps + arêtes, relecture conforme, step hors ligne rej
   assert.ok(ctl.id > 0);
 });
 
+
+// ---------------------------------------------------------------- v0.3 : documents 3 niveaux + API publique
+
+test('documents : CRUD 3 niveaux (line / step / control), 409 doublon, vue agrégée', async () => {
+  const line = await (await j('POST', '/api/lines', { code: 'DOC-' + (++seq), name: 'Ligne docs' , product_line: 'X', client: 'C', redacteur: 'T' })).json();
+  const step = await (await j('POST', '/api/lines/' + line.id + '/stations', { name: 'Soudure 1' })).json();
+
+  const docLine = await (await j('POST', '/api/lines/' + line.id + '/documents', { title: 'Plan qualité ligne', source: 'modop', modop_ref: 'pq-ligne', url: 'https://modop.calironi.com/w/pq-ligne' }));
+  assert.equal(docLine.status, 201);
+  const d1 = await docLine.json();
+
+  const docStep = await (await j('POST', '/api/stations/' + step.id + '/documents', { title: 'MO soudure', source: 'modop', modop_ref: 'mo-soudure', url: 'https://modop.calironi.com/w/mo-soudure' }));
+  assert.equal(docStep.status, 201);
+
+  // contrôle du step (via POST /api/stations/:id/controls comme ailleurs)
+  const ctl = await (await j('POST', '/api/stations/' + step.id + '/controls', { characteristic: 'Contrôle visuel' })).json();
+  const docCtl = await (await j('POST', '/api/controls/' + ctl.id + '/documents', { title: 'Tableau de contrôle', source: 'modop', modop_ref: 'tab-visuel', url: 'https://modop.calironi.com/w/tab-visuel' }));
+  assert.equal(docCtl.status, 201);
+
+  // doublon = 409
+  const dup = await (await j('POST', '/api/lines/' + line.id + '/documents', { title: 'Plan qualité ligne', source: 'modop', modop_ref: 'pq-ligne', url: 'x' }));
+  assert.equal(dup.status, 409);
+
+  // vue agrégée
+  const agg = await (await j('GET', '/api/lines/' + line.id + '/documents')).json();
+  assert.equal(agg.generic.length, 1);
+  assert.ok(agg.stations[String(step.id)].length === 1);
+  assert.equal(agg.controls[String(ctl.id)].length, 1);
+
+  // suppression
+  const del = await j('DELETE', '/api/documents/' + d1.id);
+  assert.equal(del.status, 204);
+  const g2 = await (await j('GET', '/api/lines/' + line.id + '/documents')).json();
+  assert.equal(g2.generic.length, 0);
+
+  // le PL exporté mentionne les documents liés restants
+  const md = await (await j('GET', '/api/lines/' + line.id + '/export')).text();
+  assert.ok(md.includes('MO soudure') || md.includes('Documents'));
+});
+
+test('modop/search : non configuré = liste vide, pas de crash', async () => {
+  const r = await j('GET', '/api/modop/search?q=soudure');
+  assert.equal(r.status, 200);
+  assert.deepEqual(await r.json(), []);
+});
+
+test('API publique : 501 sans token, 401 mauvais token, 200 bon token', async () => {
+  const line = await (await j('POST', '/api/lines', { code: 'PUB-' + (++seq), name: 'Ligne pub', product_line: 'X', client: 'C', redacteur: 'T' })).json();
+
+  const noToken = await j('GET', '/api/public/lines');
+  assert.equal(noToken.status, 501);
+
+  process.env.QP_PUBLIC_TOKEN = 'test-public-token';
+  const bad = await fetch(base + '/api/public/lines', { headers: { 'x-api-token': 'wrong' } });
+  assert.equal(bad.status, 401);
+
+  const ok = await fetch(base + '/api/public/lines', { headers: { 'x-api-token': 'test-public-token' } });
+  assert.equal(ok.status, 200);
+  const body = await ok.json();
+  assert.ok(Array.isArray(body));
+  assert.ok(body.some((l: { id: string }) => l.id === line.id));
+
+  const flow = await (await fetch(base + '/api/public/lines/' + line.id + '/flow', { headers: { 'x-api-token': 'test-public-token' } })).json();
+  assert.ok(Array.isArray(flow.steps));
+
+  const pl = await fetch(base + '/api/public/lines/' + line.id + '/pl', { headers: { 'x-api-token': 'test-public-token' } });
+  assert.equal(pl.status, 200);
+  delete process.env.QP_PUBLIC_TOKEN;
+});

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { openDb } from './db.js';
 import { buildApp } from './app.js';
+import { handleMcp, mcpEnabled } from './mcp.js';
 import { DEFAULT_CTQS } from './default-ctqs.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -24,6 +25,11 @@ if (n === 0) {
 }
 
 const app = buildApp(db);
+
+// Canal MCP natif (POST /mcp, Bearer QP_MCP_TOKEN)
+if (mcpEnabled()) {
+  app.post('/mcp', handleMcp as any);
+}
 
 // Front statique (build web) si présent, sinon message d'info sur les routes non-API
 if (fs.existsSync(webDist)) {

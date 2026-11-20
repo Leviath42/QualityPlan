@@ -18,6 +18,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import { GET, POST, PUT, DEL, getFlow, saveFlow, flowToMermaid } from './api';
 import type { Station, Control, Ctq, Line, FlowEdge } from './api';
+import { DocSection } from './Documents';
 
 // ---------------------------------------------------------------------------
 // v0.2 : le flowchart est le premier citoyen — les steps portent les contrôles,
@@ -278,6 +279,8 @@ function StepInspector({ stepId, name, stepKind, ctqs, onRename, onKind, onContr
       </div>
       <button className="text-red-600 hover:underline text-xs mb-2" onClick={onDelete}>Supprimer l'étape</button>
 
+      <DocSection scope="stations" scopeId={stepId} label="Documents (modop) de l'étape" />
+
       <h3 className="font-bold text-sm mb-1">Contrôles de l'étape</h3>
       {controls.length === 0 && <p className="text-slate-500 text-xs mb-2">Aucun contrôle sur cette étape.</p>}
       {controls.map((c) => (
@@ -302,6 +305,7 @@ function StepInspector({ stepId, name, stepKind, ctqs, onRename, onKind, onContr
               {ctqs.map((q) => <option key={q.id} value={q.id}>{q.code} — {q.label}</option>)}
             </select>
           </div>
+          <DocSection scope="controls" scopeId={c.id} label="Documents du contrôle" />
           <button className="text-red-600 hover:underline text-[10px]" onClick={() => deleteControl(c)}>Supprimer ce contrôle</button>
         </div>
       ))}

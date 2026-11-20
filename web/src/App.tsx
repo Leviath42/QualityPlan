@@ -1,6 +1,8 @@
 import { useEffect, useState, useCallback } from 'react';
 import { GET, POST, PUT, DEL } from './api';
 import { FlowEditor } from './FlowEditor';
+import { DocSection } from './Documents';
+import type { Doc } from './Documents';
 import type { Line, Station, Control, Ctq, Matrix } from './api';
 
 // ---------------------------------------------------------------------------
@@ -171,35 +173,78 @@ const PL_FIELDS: Array<[keyof Control, string]> = [
   ['reaction', 'Mode de réaction NC'],
 ];
 
+// ---------------------------------------------------------------------------
+// Plan de surveillance — vue dérivée du flowchart (+ docs liés modop)
+// ---------------------------------------------------------------------------
+
 function PlView({ line, setView }: { line: Line; setView: (v: View) => void }) {
+  const [docs, setDocs] = useState<{ generic: Doc[]; stations: Record<string, Doc[]>; controls: Record<string, Doc[]> } | null>(null);
+  const [derr, setDErr] = useState('');
+  useEffect(() => {
+    GET<{ generic: Doc[]; stations: Record<string, Doc[]>; controls: Record<string, Doc[]> }>('/api/lines/' + line.id + '/documents')
+      .then(setDocs)
+      .catch((e) => setDErr(String(e)));
+  }, [line.id, line.updated_at]);
   const st = (line.stations || []) as Array<Station & { controls?: Control[]; step_kind?: string }>;
+  const stepDocs = (s: Station): Doc[] => ((docs?.stations ?? {})[String(s.id)] ?? []);
+  const ctlDocs = (id: number): Doc[] => ((docs?.controls ?? {})[String(id)] ?? []);
   return (
     <div>
       <div className="flex items-center gap-2 mb-3">
         <span className="text-slate-500 text-sm">Généré depuis le flowchart — modifie les étapes dans l'onglet Flowchart.</span>
         <a className="btn-alt ml-auto" href={'/api/lines/' + line.id + '/export'} target="_blank" rel="noreferrer">Export MD</a>
       </div>
+      <div className="bg-white rounded shadow p-3 mb-4">
+        <DocSection scope="lines" scopeId={line.id} label="Documents génériques (toute la ligne)" />
+      </div>
+      {derr && <p className="text-red-600 text-sm">{derr}</p>}
       {st.length === 0 && <p className="text-slate-500">Aucune étape définie. Onglet Flowchart → « + Étape ».</p>}
       {st.map((s, i) => (
         <div key={s.id} className="mb-6">
           <h2 className="font-bold mb-1">{i + 1}. {s.name} <span className="text-xs text-slate-400">[{s.step_kind ?? 'etape'}]</span></h2>
+          {(stepDocs(s).length > 0 || docs === null) && (
+            <p className="text-xs text-slate-500 mb-1">
+              Docs étape :{' '}
+              {stepDocs(s).map((d, k) => (
+                <span key={d.id}>
+                  {k > 0 ? ', ' : ''}
+                  {d.url
+                    ? <a className="text-blue-600 hover:underline" href={d.url} target="_blank" rel="noreferrer">{d.title}</a>
+                    : d.title}
+                </span>
+              ))}
+              {stepDocs(s).length === 0 && docs !== null ? '—' : ''}
+            </p>
+          )}
           <table className="w-full bg-white rounded shadow text-xs">
             <thead className="bg-slate-200 text-left">
               <tr>
                 <th className="p-2">Caractéristique contrôlée</th>
                 {PL_FIELDS.map(([, lbl]) => <th key={lbl} className="p-2">{lbl}</th>)}
                 <th className="p-2">CTQ</th>
+                <th className="p-2">Docs</th>
               </tr>
             </thead>
             <tbody>
               {((s.controls as Control[]) || []).length === 0 && (
-                <tr className="border-t"><td className="p-2 text-slate-400" colSpan={PL_FIELDS.length + 2}>Aucun contrôle défini sur cette étape.</td></tr>
+                <tr className="border-t"><td className="p-2 text-slate-400" colSpan={PL_FIELDS.length + 3}>Aucun contrôle défini sur cette étape.</td></tr>
               )}
               {((s.controls as Control[]) || []).map((c) => (
                 <tr key={c.id} className="border-t">
                   <td className="p-2 font-medium">{c.characteristic}{c.kind === 'moyen' ? ' <moyen>' : ''}</td>
                   {PL_FIELDS.map(([f]) => <td key={f} className="p-2">{String(c[f] ?? '') || '—'}</td>)}
                   <td className="p-2">{(c.ctq_ids ?? []).length > 0 ? (c.ctq_ids ?? []).join(', ') : '—'}</td>
+                  <td className="p-2 text-xs">
+                    {ctlDocs(c.id).map((d, k) => (
+                      <span key={d.id}>
+                        {k > 0 ? ', ' : ''}
+                        {d.url
+                          ? <a className="text-blue-600 hover:underline" href={d.url} target="_blank" rel="noreferrer">{d.title}</a>
+                          : d.title}
+                      </span>
+                    ))}
+                    {ctlDocs(c.id).length === 0 ? '—' : ''}
+                  </td>
                 </tr>
               ))}
             </tbody>
