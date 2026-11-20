@@ -84,7 +84,7 @@ async function modopWorkflows(search: string): Promise<Array<Record<string, unkn
   const baseUrl = (process.env.MODOP_BASE_URL ?? '').replace(/\/$/, '');
   if (baseUrl) {
     for (const r of rows) {
-      if (!r.url && (r.reference || r.id)) r.url = baseUrl + '/' + String(r.slug ?? r.reference ?? r.id);
+      if (!r.url && r.id) r.url = baseUrl + '/workflow/' + String(r.id) + '/read';
     }
   }
   return rows;
