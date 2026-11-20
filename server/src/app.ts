@@ -73,7 +73,7 @@ async function modopWorkflows(search: string): Promise<Array<Record<string, unkn
   };
   const r = await fetch(base, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token, 'user-agent': 'qualityplan/0.3' },
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: 'Bearer ' + token, 'user-agent': 'qualityplan/0.3' },
     body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error('HTTP ' + r.status);
