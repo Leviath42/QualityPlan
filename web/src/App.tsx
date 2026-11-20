@@ -1,13 +1,15 @@
 import { useEffect, useState, useCallback } from 'react';
 import { GET, POST, PUT, DEL } from './api';
+import { FlowEditor } from './FlowEditor';
 import type { Line, Station, Control, Ctq, Matrix } from './api';
 
 // ---------------------------------------------------------------------------
-// Chantier v0.1 : lignes/gammes > postes > contrôles + matrice CTQ.
-// Standard modop (React+Vite+Tailwind), périmètre CDC (pas d'auth, single-user).
+// QualityPlan v0.2 : flowchart = source de vérité, PL = vue dérivée.
+// Onglets par ligne : Flowchart (édition) / Plan de surveillance (dérivé) / Matrice CTQ.
 // ---------------------------------------------------------------------------
 
-type View = { page: 'home' } | { page: 'line'; id: number } | { page: 'ctqs' } | { page: 'matrix'; id: number };
+type Tab = 'flow' | 'pl' | 'matrix';
+type View = { page: 'home' } | { page: 'line'; id: number; tab: Tab } | { page: 'ctqs' };
 
 export function App() {
   const [view, setView] = useState<View>({ page: 'home' });
@@ -18,7 +20,7 @@ export function App() {
         <button className="text-lg font-bold" onClick={() => setView({ page: 'home' })}>
           QualityPlan
         </button>
-        <span className="text-slate-300 text-sm">Plans de surveillance &amp; CTQ</span>
+        <span className="text-slate-300 text-sm">Flowcharts process & plans de surveillance</span>
         <nav className="ml-auto flex gap-4 text-sm">
           <button className="hover:underline" onClick={() => setView({ page: 'home' })}>Lignes</button>
           <button className="hover:underline" onClick={() => setView({ page: 'ctqs' })}>CTQ</button>
@@ -30,11 +32,10 @@ export function App() {
           <button className="font-bold" onClick={() => setErr('')}>×</button>
         </div>
       )}
-      <main className="p-6 max-w-6xl mx-auto">
-        {view.page === 'home' && <Home onOpen={(id) => setView({ page: 'line', id })} setErr={setErr} />}
-        {view.page === 'line' && <LineDetail id={view.id} setView={setView} setErr={setErr} />}
+      <main className="p-6 max-w-7xl mx-auto">
+        {view.page === 'home' && <Home onOpen={(id) => setView({ page: 'line', id, tab: 'flow' })} setErr={setErr} />}
+        {view.page === 'line' && <LinePage id={view.id} tab={view.tab} setView={setView} setErr={setErr} />}
         {view.page === 'ctqs' && <CtqLib setErr={setErr} />}
-        {view.page === 'matrix' && <MatrixView id={view.id} setView={setView} setErr={setErr} />}
       </main>
     </div>
   );
@@ -64,7 +65,7 @@ function Home({ onOpen, setErr }: { onOpen: (id: number) => void; setErr: (s: st
   return (
     <section>
       <h1 className="text-xl font-bold mb-4">Lignes / gammes</h1>
-      {lines.length === 0 && <p className="text-slate-500">Aucune ligne. Crée la première ci-dessous.</p>}
+      {lines.length === 0 && <p className="text-slate-500">Aucune ligne. Crée la première ci-dessous, puis dessine son flowchart.</p>}
       <table className="w-full bg-white rounded shadow text-sm">
         <thead className="bg-slate-200 text-left">
           <tr><th className="p-2">Code</th><th className="p-2">Nom</th><th className="p-2">Produit</th><th className="p-2">Client</th><th className="p-2">MAJ</th><th className="p-2"></th></tr>
@@ -102,164 +103,111 @@ function Home({ onOpen, setErr }: { onOpen: (id: number) => void; setErr: (s: st
 }
 
 // ---------------------------------------------------------------------------
-// Détail ligne — en-tête, postes, contrôles, CTQ par contrôle
+// Page ligne — onglets Flowchart / PL dérivé / Matrice
 // ---------------------------------------------------------------------------
 
-const FIELDS: Array<[keyof Control, string]> = [
-  ['doc_ref', 'Doc réf'],
-  ['method', 'Moyen'],
-  ['support', 'Support enregistrement'],
-  ['frequency', 'Fréquence'],
-  ['responsible', 'Responsable'],
-  ['reaction', 'Réaction NC'],
-];
-
-function LineDetail({ id, setView, setErr }: { id: number; setView: (v: View) => void; setErr: (s: string) => void }) {
+function LinePage({ id, tab, setView, setErr }: { id: number; tab: Tab; setView: (v: View) => void; setErr: (s: string) => void }) {
   const [line, setLine] = useState<Line | null>(null);
   const [ctqs, setCtqs] = useState<Ctq[]>([]);
-  const [stName, setStName] = useState('');
+  const [bump, setBump] = useState(0);
 
   const load = useCallback(async () => {
     try {
-      setLine(await GET<Line>(`/api/lines/${id}`));
+      setLine(await GET<Line>('/api/lines/' + id));
       setCtqs(await GET<Ctq[]>('/api/ctqs'));
     } catch (e) { setErr(String(e)); }
   }, [id, setErr]);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); bump; }, [load, bump]);
 
   if (!line) return <p>Chargement…</p>;
-  const st = (line.stations || []) as Array<Station & { controls?: Control[] }>;
 
   async function saveHeader(patch: Partial<Line>) {
-    try { await PUT(`/api/lines/${id}`, patch); } catch (e) { setErr(String(e)); }
-  }
-  async function addStation() {
-    if (!stName.trim()) return;
-    try {
-      await POST(`/api/lines/${id}/stations`, { name: stName, ordre: st.length });
-      setStName(''); load();
-    } catch (e) { setErr(String(e)); }
-  }
-  async function addControl(stationId: number, characteristic: string) {
-    try {
-      await POST(`/api/stations/${stationId}/controls`, { characteristic });
-      load();
-    } catch (e) { setErr(String(e)); }
-  }
-  async function saveControl(c: Control) {
-    try { await PUT(`/api/controls/${c.id}`, c); } catch (e) { setErr(String(e)); }
-  }
-  async function linkCtq(controlId: number, ctqIds: number[]) {
-    try { await PUT(`/api/controls/${controlId}/ctqs`, { ctq_ids: ctqIds }); } catch (e) { setErr(String(e)); }
+    try { await PUT('/api/lines/' + id, patch); load(); } catch (e) { setErr(String(e)); }
   }
 
   return (
     <section>
-      <div className="flex items-center gap-3 mb-4">
+      <div className="flex items-center gap-3 mb-2 flex-wrap">
         <button className="text-blue-600 hover:underline text-sm" onClick={() => setView({ page: 'home' })}>← Lignes</button>
         <h1 className="text-xl font-bold">{line.code} — {line.name}</h1>
-        <button className="btn ml-auto" onClick={() => setView({ page: 'matrix', id })}>Matrice CTQ</button>
-        <a className="btn-alt" href={`/api/lines/${id}/export`} target="_blank" rel="noreferrer">Export MD</a>
+        <div className="ml-auto flex gap-1">
+          {(['flow', 'pl', 'matrix'] as Tab[]).map((t) => (
+            <button key={t} className={t === tab ? 'btn' : 'btn-alt'} onClick={() => setView({ page: 'line', id, tab: t })}>
+              {t === 'flow' ? 'Flowchart' : t === 'pl' ? 'Plan de surveillance' : 'Matrice CTQ'}
+            </button>
+          ))}
+        </div>
       </div>
 
-      <div className="grid grid-cols-4 gap-2 bg-white rounded shadow p-3 text-sm mb-6">
+      <div className="grid grid-cols-6 gap-2 bg-white rounded shadow p-3 text-sm mb-4">
         {([['ref', 'Réf (PL …)'], ['product_line', 'Ligne produit'], ['client', 'Client'],
            ['redacteur', 'Rédacteur'], ['verificateur', 'Vérificateur'], ['approbateur', 'Approbateur']] as Array<[keyof Line, string]>).map(([k, lbl]) => (
           <label key={String(k)} className="flex flex-col">
             <span className="text-xs text-slate-500">{lbl}</span>
-            <input className="inp" defaultValue={String(line[k] ?? '')}
+            <input className="inp" defaultValue={String(line[k] ?? '')} key={k + '-' + String(line.updated_at)}
               onBlur={(e) => saveHeader({ [k]: e.target.value } as Partial<Line>)} />
           </label>
         ))}
       </div>
 
-      {st.map((s) => (
-        <div key={s.id} className="mb-6">
-          <h2 className="font-bold mb-1">Poste {s.ordre + 1} — {s.name}</h2>
-          <table className="w-full bg-white rounded shadow text-xs">
-            <thead className="bg-slate-200 text-left">
-              <tr>
-                <th className="p-2">Caractéristique contrôlée</th>
-                {FIELDS.map(([f, lbl]) => <th key={f} className="p-2">{lbl}</th>)}
-                <th className="p-2">CTQ couverts</th>
-                <th className="p-2"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {((s.controls as Control[]) || []).map((c) => (
-                <ControlRow key={c.id} c={c} ctqs={ctqs} onSave={saveControl} onLink={linkCtq} />
-              ))}
-              <tr className="border-t bg-slate-50">
-                <NewControlRow colCount={FIELDS.length + 3} onAdd={(v) => addControl(s.id, v)} />
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      ))}
-
-      <div className="flex gap-2">
-        <input className="inp" placeholder="Nouveau poste (ex. Montage voyant)" value={stName}
-          onChange={(e) => setStName(e.target.value)} />
-        <button className="btn" onClick={addStation}>Ajouter poste</button>
-      </div>
+      {tab === 'flow' && <FlowEditor line={line} ctqs={ctqs} onLineChanged={() => setBump((b) => b + 1)} setErr={setErr} />}
+      {tab === 'pl' && <PlView line={line} setView={setView} />}
+      {tab === 'matrix' && <MatrixView id={id} setView={setView} setErr={setErr} />}
     </section>
   );
 }
 
-function ControlRow({ c, ctqs, onSave, onLink }: {
-  c: Control; ctqs: Ctq[];
-  onSave: (c: Control) => void; onLink: (id: number, ids: number[]) => void;
-}) {
-  const [ctrl, setCtrl] = useState<Control>(c);
-  const [links, setLinks] = useState<number[]>(c.ctq_ids || []);
+// ---------------------------------------------------------------------------
+// Plan de surveillance — VUE DÉRIVÉE DU FLOWCHART (lecture seule)
+// Les contrôles se saisissent dans le flowchart ; ici on lit, on exporte.
+// ---------------------------------------------------------------------------
 
-  function upd(patch: Partial<Control>) {
-    const next = { ...ctrl, ...patch };
-    setCtrl(next);
-    onSave(next);
-  }
+const PL_FIELDS: Array<[keyof Control, string]> = [
+  ['doc_ref', 'Doc de référence'],
+  ['method', 'Moyen'],
+  ['support', 'Support enregistrements'],
+  ['frequency', 'Fréquence'],
+  ['responsible', 'Responsable'],
+  ['reaction', 'Mode de réaction NC'],
+];
 
+function PlView({ line, setView }: { line: Line; setView: (v: View) => void }) {
+  const st = (line.stations || []) as Array<Station & { controls?: Control[]; step_kind?: string }>;
   return (
-    <tr className="border-t">
-      <td className="p-1">
-        <input className="cellinp" value={ctrl.characteristic}
-          onChange={(e) => upd({ characteristic: e.target.value })} />
-      </td>
-      {FIELDS.map(([f]) => (
-        <td key={f} className="p-1">
-          <input className="cellinp" value={String(ctrl[f] ?? '')}
-            onChange={(e) => upd({ [f]: e.target.value } as Partial<Control>)} />
-        </td>
+    <div>
+      <div className="flex items-center gap-2 mb-3">
+        <span className="text-slate-500 text-sm">Généré depuis le flowchart — modifie les étapes dans l'onglet Flowchart.</span>
+        <a className="btn-alt ml-auto" href={'/api/lines/' + line.id + '/export'} target="_blank" rel="noreferrer">Export MD</a>
+      </div>
+      {st.length === 0 && <p className="text-slate-500">Aucune étape définie. Onglet Flowchart → « + Étape ».</p>}
+      {st.map((s, i) => (
+        <div key={s.id} className="mb-6">
+          <h2 className="font-bold mb-1">{i + 1}. {s.name} <span className="text-xs text-slate-400">[{s.step_kind ?? 'etape'}]</span></h2>
+          <table className="w-full bg-white rounded shadow text-xs">
+            <thead className="bg-slate-200 text-left">
+              <tr>
+                <th className="p-2">Caractéristique contrôlée</th>
+                {PL_FIELDS.map(([, lbl]) => <th key={lbl} className="p-2">{lbl}</th>)}
+                <th className="p-2">CTQ</th>
+              </tr>
+            </thead>
+            <tbody>
+              {((s.controls as Control[]) || []).length === 0 && (
+                <tr className="border-t"><td className="p-2 text-slate-400" colSpan={PL_FIELDS.length + 2}>Aucun contrôle défini sur cette étape.</td></tr>
+              )}
+              {((s.controls as Control[]) || []).map((c) => (
+                <tr key={c.id} className="border-t">
+                  <td className="p-2 font-medium">{c.characteristic}{c.kind === 'moyen' ? ' <moyen>' : ''}</td>
+                  {PL_FIELDS.map(([f]) => <td key={f} className="p-2">{String(c[f] ?? '') || '—'}</td>)}
+                  <td className="p-2">{(c.ctq_ids ?? []).length > 0 ? (c.ctq_ids ?? []).join(', ') : '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       ))}
-      <td className="p-1">
-        <select className="cellinp" multiple size={Math.max(2, Math.min(6, ctqs.length))} value={links.map(String)}
-          onChange={(e) => {
-            const ids = Array.from(e.target.selectedOptions).map((o) => Number(o.value));
-            setLinks(ids);
-            onLink(c.id, ids);
-          }}>
-          {ctqs.map((q) => <option key={q.id} value={q.id}>{q.code} — {q.label}</option>)}
-        </select>
-      </td>
-      <td className="p-1 text-center">
-        <button className="text-red-600 hover:underline"
-          onClick={async () => { await DEL(`/api/controls/${c.id}`); window.location.reload(); }}>Suppr.</button>
-      </td>
-    </tr>
-  );
-}
-
-function NewControlRow({ colCount, onAdd }: { colCount: number; onAdd: (v: string) => void }) {
-  const [v, setV] = useState('');
-  return (
-    <>
-      <td className="p-1">
-        <input className="cellinp" placeholder="+ Caractéristique…" value={v}
-          onChange={(e) => setV(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter' && v.trim()) { onAdd(v); setV(''); } }} />
-      </td>
-      <td colSpan={colCount - 1}></td>
-    </>
+      <button className="btn-alt" onClick={() => setView({ page: 'line', id: line.id, tab: 'matrix' })}>Voir la matrice CTQ →</button>
+    </div>
   );
 }
 
@@ -297,7 +245,7 @@ function CtqLib({ setErr }: { setErr: (s: string) => void }) {
               <td className="p-2">{q.regime}</td>
               <td className="p-2 text-right">
                 <button className="text-red-600 hover:underline"
-                  onClick={async () => { await DEL(`/api/ctqs/${q.id}`); load(); }}>Suppr.</button>
+                  onClick={async () => { await DEL('/api/ctqs/' + q.id); load(); }}>Suppr.</button>
               </td>
             </tr>
           ))}
@@ -323,7 +271,7 @@ function MatrixView({ id, setView, setErr }: { id: number; setView: (v: View) =>
   const [m, setM] = useState<Matrix | null>(null);
 
   const load = useCallback(async () => {
-    try { setM(await GET<Matrix>(`/api/lines/${id}/matrix`)); } catch (e) { setErr(String(e)); }
+    try { setM(await GET<Matrix>('/api/lines/' + id + '/matrix')); } catch (e) { setErr(String(e)); }
   }, [id, setErr]);
   useEffect(() => { load(); }, [load]);
 
@@ -338,7 +286,7 @@ function MatrixView({ id, setView, setErr }: { id: number; setView: (v: View) =>
   return (
     <section>
       <div className="flex items-center gap-3 mb-4">
-        <button className="text-blue-600 hover:underline text-sm" onClick={() => setView({ page: 'line', id })}>← Plan</button>
+        <button className="text-blue-600 hover:underline text-sm" onClick={() => setView({ page: 'line', id, tab: 'pl' })}>← Plan</button>
         <h1 className="text-xl font-bold">Matrice CTQ — {m.line_code}</h1>
         <span className="ml-auto text-sm">
           Couverture globale :

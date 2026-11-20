@@ -58,9 +58,13 @@ const lineSchema = z.object({
   approbateur: z.string().trim().max(120).optional().default(''),
 });
 
+const stepKindSchema = z.enum(['debut', 'etape', 'controle', 'decision', 'fin']);
 const stationSchema = z.object({
   name: z.string().trim().min(1).max(200),
   ordre: z.number().int().min(0).max(999).optional().default(0),
+  step_kind: stepKindSchema.optional().default('etape'),
+  pos_x: z.number().optional(),
+  pos_y: z.number().optional(),
 });
 
 const controlSchema = z.object({
@@ -92,7 +96,7 @@ export type LineRow = {
   redacteur: string; verificateur: string; approbateur: string;
   created_at: string; updated_at: string;
 };
-export type StationRow = { id: number; line_id: number; name: string; ordre: number; created_at: string };
+export type StationRow = { id: number; line_id: number; name: string; ordre: number; step_kind: string; pos_x: number; pos_y: number; created_at: string };
 export type ControlRow = {
   id: number; station_id: number; characteristic: string; kind: string; doc_ref: string;
   method: string; support: string; frequency: string; responsible: string; reaction: string;
@@ -220,12 +224,12 @@ export function buildApp(db: Db): Express {
 
   // ---- Postes ---------------------------------------------------------------
   app.post('/api/lines/:id/stations', wrap((req, res) => {
-    const line = db.prepare(`SELECT id FROM lines WHERE id = ?`).get(Number(req.params.id));
+    const line = db.prepare(`SELECT id FROM lines WHERE id = ?`).get(Number(req.params.id)) as { id: number } | undefined;
     if (!line) { res.status(404).json({ error: 'ligne introuvable' }); return; }
     const data = stationSchema.parse(req.body);
     const info = db
-      .prepare(`INSERT INTO stations(line_id, name, ordre) VALUES (?, ?, ?)`)
-      .run(Number(req.params.id), data.name, data.ordre);
+      .prepare(`INSERT INTO stations(line_id, name, ordre, step_kind, pos_x, pos_y) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(Number(req.params.id), data.name, data.ordre, data.step_kind, data.pos_x ?? 0, data.pos_y ?? 0);
     touchLine(db, Number(req.params.id));
     res.status(201).json(
       db.prepare(`SELECT * FROM stations WHERE id = ?`).get(Number(info.lastInsertRowid))
@@ -237,7 +241,7 @@ export function buildApp(db: Db): Express {
     if (!row) { res.status(404).json({ error: 'poste introuvable' }); return; }
     const data = stationSchema.partial().parse(req.body);
     const merged = { ...row, ...data };
-    db.prepare(`UPDATE stations SET name=?, ordre=? WHERE id=?`).run(merged.name, merged.ordre, row.id);
+    db.prepare(`UPDATE stations SET name=?, ordre=?, step_kind=?, pos_x=?, pos_y=? WHERE id=?`).run(merged.name, merged.ordre, merged.step_kind ?? row.step_kind, merged.pos_x ?? row.pos_x, merged.pos_y ?? row.pos_y, row.id);
     touchLine(db, row.line_id);
     res.json(db.prepare(`SELECT * FROM stations WHERE id = ?`).get(row.id));
   }));
@@ -248,6 +252,64 @@ export function buildApp(db: Db): Express {
     db.prepare(`DELETE FROM stations WHERE id = ?`).run(row.id);
     touchLine(db, row.line_id);
     res.status(204).end();
+  }));
+
+  // ---- Flowchart (steps + aretes) ------------------------------------------
+  app.get('/api/lines/:id/flow', wrap((req, res) => {
+    const line = db.prepare(`SELECT id FROM lines WHERE id = ?`).get(Number(req.params.id)) as { id: number } | undefined;
+    if (!line) { res.status(404).json({ error: 'ligne introuvable' }); return; }
+    const steps = db
+      .prepare(`SELECT * FROM stations WHERE line_id = ? ORDER BY ordre, id`)
+      .all(Number(req.params.id));
+    const edges = (db
+      .prepare(`SELECT from_station, to_station FROM flow_edges WHERE line_id = ? ORDER BY id`)
+      .all(Number(req.params.id)) as Array<{ from_station: number; to_station: number }>)
+      .map((e) => ({ from: e.from_station, to: e.to_station }));
+    res.json({ steps, edges });
+  }));
+
+  const flowSaveSchema = z.object({
+    steps: z.array(z.object({
+      id: z.number().int(),
+      name: z.string().trim().min(1).max(200).optional(),
+      step_kind: stepKindSchema.optional(),
+      pos_x: z.number(),
+      pos_y: z.number(),
+      ordre: z.number().int().min(0).max(999).optional(),
+    })).max(200),
+    edges: z.array(z.object({ from: z.number().int(), to: z.number().int() })).max(500),
+  });
+
+  app.put('/api/lines/:id/flow', wrap((req, res) => {
+    const line = db.prepare(`SELECT id FROM lines WHERE id = ?`).get(Number(req.params.id)) as { id: number } | undefined;
+    if (!line) { res.status(404).json({ error: 'ligne introuvable' }); return; }
+    const data = flowSaveSchema.parse(req.body);
+    const own = new Set(
+      (db.prepare(`SELECT id FROM stations WHERE line_id = ?`).all(line.id) as Array<{ id: number }>).map((r) => r.id)
+    );
+    for (const st of data.steps) {
+      if (!own.has(st.id)) { res.status(400).json({ error: 'step hors ligne', id: st.id }); return; }
+    }
+    for (const e of data.edges) {
+      if (!own.has(e.from) || !own.has(e.to)) { res.status(400).json({ error: 'arete vers step hors ligne' }); return; }
+    }
+    const tx = db.transaction(() => {
+      const updStep = db.prepare(`UPDATE stations SET name=?, step_kind=?, pos_x=?, pos_y=?, ordre=? WHERE id=?`);
+      const cur = db.prepare(`SELECT * FROM stations WHERE id = ?`);
+      for (const [i, st] of data.steps.entries()) {
+        const row = cur.get(st.id) as StationRow;
+        updStep.run(st.name ?? row.name, st.step_kind ?? row.step_kind, st.pos_x, st.pos_y, st.ordre ?? i, st.id);
+      }
+      db.prepare(`DELETE FROM flow_edges WHERE line_id = ?`).run(line.id);
+      const insEdge = db.prepare(`INSERT INTO flow_edges(line_id, from_station, to_station) VALUES (?,?,?)`);
+      for (const e of data.edges) insEdge.run(line.id, e.from, e.to);
+      touchLine(db, line.id);
+    });
+    tx();
+    const steps = db.prepare(`SELECT * FROM stations WHERE line_id = ? ORDER BY ordre, id`).all(line.id);
+    const edges = (db.prepare(`SELECT from_station, to_station FROM flow_edges WHERE line_id = ? ORDER BY id`).all(line.id) as Array<{ from_station: number; to_station: number }>)
+      .map((e) => ({ from: e.from_station, to: e.to_station }));
+    res.json({ steps, edges });
   }));
 
   // ---- Contrôles ------------------------------------------------------------

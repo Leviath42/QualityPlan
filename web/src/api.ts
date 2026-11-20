@@ -30,13 +30,16 @@ export interface Line {
   created_at: string; updated_at: string;
   stations?: Station[];
 }
-export interface Station { id: number; line_id: number; name: string; ordre: number; controls?: Control[] }
+export type StepKind = 'debut' | 'etape' | 'controle' | 'decision' | 'fin';
+export interface Station { id: number; line_id: number; name: string; ordre: number; step_kind?: StepKind; pos_x?: number; pos_y?: number; controls?: Control[] }
 export interface Control {
   id: number; station_id: number; characteristic: string; kind: string; doc_ref: string;
   method: string; support: string; frequency: string; responsible: string; reaction: string;
   ctq_ids?: number[];
 }
 export interface Ctq { id: number; code: string; label: string; family: string; regime: string }
+export interface FlowEdge { from: number; to: number }
+export interface Flow { steps: Station[]; edges: FlowEdge[] }
 export interface MatrixCtq {
   ctq_id: number; code: string; label: string; family: string; regime: string;
   points: number; status: 'couvert' | 'partiel' | 'angle_mort';
@@ -47,4 +50,24 @@ export interface Matrix {
   ctqs: MatrixCtq[];
   orphans: Array<{ id: number; characteristic: string; station_id: number }>;
   families: Array<{ family: string; total: number; covered: number; partial: number; blind: number }>;
+}
+
+export async function getFlow(lineId: number): Promise<Flow> {
+  return GET<Flow>('/api/lines/' + lineId + '/flow');
+}
+export async function saveFlow(lineId: number, flow: Flow): Promise<Flow> {
+  return PUT<Flow>('/api/lines/' + lineId + '/flow', flow);
+}
+export function flowToMermaid(flow: Flow): string {
+  const lines = ['flowchart TD'];
+  for (const s of flow.steps) {
+    const shape = s.step_kind === 'decision'
+      ? '\"' + s.name + '\"{'
+      : s.step_kind === 'debut' || s.step_kind === 'fin'
+        ? '([' + JSON.stringify(s.name) + '])'
+        : '\"' + s.name + '\"';
+    lines.push('  N' + s.id + shape);
+  }
+  for (const e of flow.edges) lines.push('  N' + e.from + ' --> N' + e.to);
+  return lines.join('\n');
 }

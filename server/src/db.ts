@@ -24,12 +24,23 @@ CREATE TABLE IF NOT EXISTS lines (
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- schema v2 : steps du flowchart (ex-postes) + arêtes
 CREATE TABLE IF NOT EXISTS stations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   line_id INTEGER NOT NULL REFERENCES lines(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   ordre INTEGER NOT NULL DEFAULT 0,
+  step_kind TEXT NOT NULL DEFAULT 'etape',
+  pos_x REAL NOT NULL DEFAULT 0,
+  pos_y REAL NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS flow_edges (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  line_id INTEGER NOT NULL REFERENCES lines(id) ON DELETE CASCADE,
+  from_station INTEGER NOT NULL REFERENCES stations(id) ON DELETE CASCADE,
+  to_station INTEGER NOT NULL REFERENCES stations(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS controls (
@@ -65,7 +76,40 @@ CREATE TABLE IF NOT EXISTS controls_ctqs (
 CREATE INDEX IF NOT EXISTS idx_stations_line ON stations(line_id, ordre);
 CREATE INDEX IF NOT EXISTS idx_controls_station ON controls(station_id);
 CREATE INDEX IF NOT EXISTS idx_controls_ctqs_ctq ON controls_ctqs(ctq_id);
+CREATE INDEX IF NOT EXISTS idx_flow_edges_line ON flow_edges(line_id);
 `;
+
+// Migration v1 -> v2 : colonnes steps + layout grille auto + chainage des arêtes.
+function migrate(db: Db): void {
+  const hasKind = db
+    .prepare(`SELECT count(*) AS n FROM pragma_table_info('stations') WHERE name='step_kind'`)
+    .get() as { n: number };
+  if (hasKind.n === 0) {
+    db.exec(`ALTER TABLE stations ADD COLUMN step_kind TEXT NOT NULL DEFAULT 'etape';
+             ALTER TABLE stations ADD COLUMN pos_x REAL NOT NULL DEFAULT 0;
+             ALTER TABLE stations ADD COLUMN pos_y REAL NOT NULL DEFAULT 0;`);
+    // layout auto des steps existants : grille 4 colonnes, ordre conservé
+    const lines = db.prepare('SELECT id FROM lines').all() as Array<{ id: number }>;
+    const upd = db.prepare('UPDATE stations SET pos_x=?, pos_y=? WHERE id=?');
+    const all = db.prepare('SELECT id, line_id, ordre FROM stations ORDER BY line_id, ordre, id');
+    const byLine = new Map<number, Array<{ id: number }>>();
+    for (const s of all.all() as Array<{ id: number; line_id: number }>) {
+      if (!byLine.has(s.line_id)) byLine.set(s.line_id, []);
+      byLine.get(s.line_id)!.push({ id: s.id });
+    }
+    const insEdge = db.prepare('INSERT INTO flow_edges(line_id, from_station, to_station) VALUES (?,?,?)');
+    db.exec('CREATE TABLE IF NOT EXISTS flow_edges (id INTEGER PRIMARY KEY AUTOINCREMENT, line_id INTEGER NOT NULL REFERENCES lines(id) ON DELETE CASCADE, from_station INTEGER NOT NULL REFERENCES stations(id) ON DELETE CASCADE, to_station INTEGER NOT NULL REFERENCES stations(id) ON DELETE CASCADE)');
+    for (const [lineId, steps] of byLine) {
+      steps.forEach((s, i) => {
+        upd.run((i % 4) * 220, Math.floor(i / 4) * 120, s.id);
+        if (i > 0) insEdge.run(lineId, steps[i - 1].id, s.id);
+      });
+    }
+    db.prepare(`UPDATE meta SET value='2' WHERE key='schema_version'`).run();
+  }
+  db.exec('CREATE TABLE IF NOT EXISTS flow_edges (id INTEGER PRIMARY KEY AUTOINCREMENT, line_id INTEGER NOT NULL REFERENCES lines(id) ON DELETE CASCADE, from_station INTEGER NOT NULL REFERENCES stations(id) ON DELETE CASCADE, to_station INTEGER NOT NULL REFERENCES stations(id) ON DELETE CASCADE)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_flow_edges_line ON flow_edges(line_id)');
+}
 
 export function openDb(file: string): Db {
   if (file !== ':memory:') {
@@ -76,6 +120,7 @@ export function openDb(file: string): Db {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.exec(DDL);
-  db.exec(`INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1')`);
+  db.exec(`INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '2')`);
+  migrate(db);
   return db;
 }

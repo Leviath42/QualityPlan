@@ -188,3 +188,52 @@ test('404 propres sur entités inexistantes', async () => {
   assert.equal((await j('DELETE', '/api/controls/999999')).status, 404);
   assert.equal((await j('GET', '/api/lines/999999/matrix')).status, 404);
 });
+
+
+// ---------------------------------------------------------------------------
+// v0.2 : flowchart — steps positionnables + arêtes, PL dérivé inchangé
+// ---------------------------------------------------------------------------
+
+test('flow : sauvegarde steps + arêtes, relecture conforme, step hors ligne rejeté', async () => {
+  const line = await (await j('POST', '/api/lines', { code: 'FLOW-' + (++seq), name: 'Flow test' })).json();
+  const s1 = await (await j('POST', '/api/lines/' + line.id + '/stations', { name: 'Découpe' })).json();
+  const s2 = await (await j('POST', '/api/lines/' + line.id + '/stations', { name: 'Soudure' })).json();
+
+  const put = await j('PUT', '/api/lines/' + line.id + '/flow', {
+    steps: [
+      { id: s1.id, pos_x: 100, pos_y: 50, step_kind: 'debut' },
+      { id: s2.id, pos_x: 320, pos_y: 50 },
+    ],
+    edges: [{ from: s1.id, to: s2.id }],
+  });
+  assert.equal(put.status, 200);
+  const f = await put.json();
+  assert.equal(f.steps.length, 2);
+  assert.equal(f.steps.find((x: { id: number }) => x.id === s1.id).pos_x, 100);
+  assert.equal(f.steps.find((x: { id: number }) => x.id === s1.id).step_kind, 'debut');
+  assert.equal(f.edges.length, 1);
+  assert.equal(f.edges[0].from, s1.id);
+  assert.equal(f.edges[0].to, s2.id);
+
+  // relecture GET
+  const g = await (await j('GET', '/api/lines/' + line.id + '/flow')).json();
+  assert.equal(g.edges[0].from, s1.id);
+
+  // step d'une autre ligne = 400
+  const other = await (await j('POST', '/api/lines', { code: 'FLOW2-' + (++seq), name: 'Autre' })).json();
+  const bad = await j('PUT', '/api/lines/' + other.id + '/flow', {
+    steps: [{ id: s1.id, pos_x: 0, pos_y: 0 }],
+    edges: [],
+  });
+  assert.equal(bad.status, 400);
+
+  // export dérivé inchangé : les steps portent toujours les contrôles
+  const ctl = await (await j('POST', '/api/stations/' + s2.id + '/controls', { characteristic: 'Contrôle soudure' })).json();
+  const exp = await j('GET', '/api/lines/' + line.id + '/export');
+  assert.equal(exp.status, 200);
+  const md = await exp.text();
+  assert.ok(md.includes('Découpe'));
+  assert.ok(md.includes('Contrôle soudure'));
+  assert.ok(ctl.id > 0);
+});
+
